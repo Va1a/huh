@@ -1,0 +1,5 @@
+# Ignore configuration files that might contain secrets
+config/api_keys.conf
+
+# Ignore potentially sensitive history files if generated
+*.history

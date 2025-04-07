@@ -1,0 +1,220 @@
+#!/bin/bash
+
+# huh - Reads text from stdin (presumably command output) and explains it using an LLM.
+
+# --- Default Settings ---
+verbose_mode=false
+
+# --- Argument Parsing ---
+# Simple loop to check for --verbose flag
+# Allows the flag to be anywhere before potential future arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verbose)
+      verbose_mode=true
+      shift # Remove --verbose from processing
+      ;;
+    # Add other potential flags/arguments here in the future
+    # *)
+      # break # Stop processing if we hit a non-flag argument
+      # ;;
+    *) # For now, ignore any other arguments
+      echo "Warning: Ignoring unknown argument: $1" >&2
+      shift
+      ;;
+  esac
+done
+
+
+# --- Configuration ---
+# Find the script's own directory
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+CONFIG_FILE="$SCRIPT_DIR/../config/api_keys.conf"
+
+# Load configuration if the file exists
+if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck source=../config/api_keys.conf
+    source "$CONFIG_FILE"
+else
+    echo "Warning: Configuration file not found at $CONFIG_FILE" >&2
+fi
+
+# Check dependencies
+if ! command -v jq &> /dev/null; then
+    echo "Error: 'jq' command not found. Please install jq (e.g., 'sudo apt install jq' or 'brew install jq')." >&2
+    exit 1
+fi
+if ! command -v curl &> /dev/null; then
+    echo "Error: 'curl' command not found. Please install curl." >&2
+    exit 1
+fi
+
+# Check essential configuration (Gemini)
+: "${GEMINI_API_KEY?Error: GEMINI_API_KEY is not set. Please set it in $CONFIG_FILE or as an environment variable.}"
+: "${GEMINI_MODEL:=gemini-1.5-flash}" # Default model if not set
+: "${GEMINI_API_ENDPOINT:=https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent}" # Default endpoint
+
+# --- ANSI Color Codes ---
+YELLOW='\033[1;33m' # Bold Yellow
+CYAN='\033[0;36m'   # Cyan
+RESET='\033[0m'    # Reset color
+
+# --- Helper Functions ---
+
+# Function to safely create JSON string for the prompt
+json_escape() {
+    # Simple escaping for JSON string literals within the Gemini API structure
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\n/\\n/g'
+}
+
+# Function to call the Google Gemini API
+# Takes the prompt as the first argument
+call_llm_api() {
+    local prompt_content
+    prompt_content=$(json_escape "$1") # Escape the prompt text
+    local response_json
+    local http_status
+    local curl_exit_code
+
+    # Construct the API URL with the key
+    local api_url="${GEMINI_API_ENDPOINT}?key=${GEMINI_API_KEY}"
+
+    # Construct the JSON payload for Gemini
+    local json_payload
+    json_payload=$(printf '{"contents":[{"parts":[{"text":"%s"}]}]}' "$prompt_content")
+
+    # Print status message in Yellow to stderr
+    printf "${YELLOW}Querying ${GEMINI_MODEL}...${RESET}\n" >&2
+
+    # Use curl to make the API request
+    response_json=$(curl -sS -X POST "$api_url" \
+        -H "Content-Type: application/json" \
+        --connect-timeout 15 \
+        --max-time 45 \
+        -d "$json_payload" \
+        -w '\n%{http_code}' ) # Increased timeouts slightly
+    curl_exit_code=$?
+
+    # Extract the HTTP status code (last line of output)
+    http_status=$(echo "$response_json" | tail -n1)
+    # Extract the response body (everything except the last line)
+    response_body=$(echo "$response_json" | sed '$d')
+
+    # Check curl exit code and HTTP status
+    if [ $curl_exit_code -ne 0 ]; then
+        echo "Error: curl command failed with exit code $curl_exit_code." >&2
+        if [[ -n "$response_body" ]]; then
+            echo "Curl output/error: $response_body" >&2
+        fi
+        return 1
+    fi
+
+    if [[ "$http_status" -ne 200 ]]; then
+        echo "Error: LLM API request failed with HTTP status $http_status." >&2
+        echo "API Response Body: $response_body" >&2
+        error_message=$(echo "$response_body" | jq -r '.error.message // empty')
+        if [[ -n "$error_message" ]]; then
+             echo "API Error Message: $error_message" >&2
+        fi
+        return 1
+    fi
+
+    # Parse the explanation from the JSON response using jq
+    explanation=$(echo "$response_body" | jq -r '.candidates[0].content.parts[0].text // empty')
+    local jq_exit_code=$?
+
+    if [ $jq_exit_code -ne 0 ]; then
+        echo "Error: Failed to parse LLM response with jq (exit code $jq_exit_code)." >&2
+        echo "Raw Response Body: $response_body" >&2
+        return 1
+    fi
+
+    if [ -z "$explanation" ]; then
+        echo "Error: Could not extract explanation from LLM response." >&2
+        finish_reason=$(echo "$response_body" | jq -r '.candidates[0].finishReason // empty')
+        if [[ "$finish_reason" != "STOP" && -n "$finish_reason" ]]; then
+             echo "Explanation generation stopped due to: $finish_reason" >&2
+        fi
+        echo "Raw Response Body: $response_body" >&2
+        return 1
+    fi
+
+    # Output the extracted explanation (unescaped by jq)
+    echo "$explanation"
+}
+
+# --- Main Logic ---
+
+# Check if input is being piped
+# Needs to happen *after* argument parsing
+if [ -t 0 ]; then
+    echo "Usage: command | huh [--verbose]" >&2
+    echo "Pipe the output of a command into huh for explanation." >&2
+    echo "  --verbose   Provide a more detailed explanation." >&2
+    exit 1
+fi
+
+# Read all of stdin into a variable
+# Limit input size to prevent accidental huge requests
+MAX_LINES=1000
+command_output=$(head -n $MAX_LINES)
+line_count=$(echo "$command_output" | wc -l | awk '{print $1}') # Get line count before potential truncation warning
+
+# Check if truncation happened and warn if necessary
+if [[ "$line_count" -ge "$MAX_LINES" ]]; then
+     # Check if there's still data on stdin after reading MAX_LINES
+     if IFS= read -r -t 0.1 -n 1 _; then
+         echo "Warning: Input truncated to the first $MAX_LINES lines. More input was available." >&2
+     fi
+fi
+
+if [ -z "$command_output" ]; then
+    echo "Error: No input received from stdin." >&2
+    exit 1
+fi
+
+# 1. Print the original command output
+printf '%s\n' "$command_output"
+
+# Add a separator line before the explanation
+echo ""
+
+# Construct the prompt for the LLM based on verbosity
+prompt_base="Please explain the following text, which is likely the output of a shell command.
+Provide the explanation as plain text, suitable for direct display in a terminal.
+Use newlines for readability where appropriate. Do NOT use Markdown formatting (like \`\`\`, *, #, etc.)."
+
+if [ "$verbose_mode" = true ]; then
+    prompt="$prompt_base
+
+Explain the output in reasonable detail. Do not omit information for brevity unless it's excessively repetitive.
+
+Output Text to Explain:
+---
+$command_output
+---"
+else
+    prompt="$prompt_base
+
+Explain the output very concisely, summarizing the main gist in ideally 3-5 sentences maximum. Avoid explaining every line unless necessary for the summary.
+
+Output Text to Explain:
+---
+$command_output
+---"
+fi
+
+
+# Call the LLM API and get the explanation
+explanation=$(call_llm_api "$prompt")
+
+# Check if the API call was successful
+if [ $? -ne 0 ]; then
+    # Error message already printed by call_llm_api
+    exit 1
+fi
+
+# 2. Print the colored header and the cyan explanation
+printf "${YELLOW}Huh:${RESET}\n${CYAN}%s${RESET}\n" "$explanation"
+
+exit 0
