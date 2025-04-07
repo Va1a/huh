@@ -1,0 +1,28 @@
+# Configuration for the 'huh' script
+# Add your LLM API details here.
+# IMPORTANT: Ensure this file is NOT committed to version control if it contains secrets.
+# Add 'config/api_keys.conf' to your .gitignore file.
+
+# --- Google Gemini ---
+# Get your API key from Google AI Studio: https://aistudio.google.com/app/apikey
+export GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE"
+# You can usually use the 'gemini-1.5-flash' or 'gemini-1.5-pro' model ID. Check Google's documentation for the latest.
+export GEMINI_MODEL="gemini-2.0-flash" # Or "gemini-1.5-pro" etc.
+# The endpoint typically includes the model name. Adjust if needed.
+export GEMINI_API_ENDPOINT="https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL:-gemini-1.5-flash}:generateContent"
+
+
+# --- Example for OpenAI (replace with your actual key and preferred endpoint) ---
+# export LLM_PROVIDER="openai"
+# export OPENAI_API_KEY="YOUR_OPENAI_API_KEY_HERE"
+# export LLM_API_ENDPOINT="https://api.openai.com/v1/chat/completions"
+# export LLM_MODEL="gpt-3.5-turbo" # Or gpt-4, etc.
+
+# --- Example for Anthropic Claude (replace with your actual key) ---
+# export LLM_PROVIDER="anthropic"
+# export ANTHROPIC_API_KEY="YOUR_ANTHROPIC_API_KEY_HERE"
+# export LLM_API_ENDPOINT="https://api.anthropic.com/v1/messages" # Check current endpoint
+# export LLM_MODEL="claude-3-opus-20240229" # Or other Claude models
+
+# --- Currently Used Variables (Set above for Gemini, or uncomment/edit for others) ---
+# The script will primarily look for GEMINI_API_KEY and related variables if using Gemini.
